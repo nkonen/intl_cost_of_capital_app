@@ -22,13 +22,10 @@ import streamlit as st
 # Constants
 # ----------------------------------------------------------------------
 URL_BETAS = "https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls"
-URL_OECD = (
-    "https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/"
-    "full-report/statutory-corporate-income-tax-rates_440f9286.html"
-)
+URL_OECD = "https://stat.link/0qkxo1"  # OECD Table II.1 Excel file (embedded in this app)
 URL_RATINGS = "https://pages.stern.nyu.edu/adamodar/New_Home_Page/datafile/ratings.html"
 URL_BONDS = "https://tradingeconomics.com/bonds"
-TE_PAGES = [URL_BONDS] + [
+TE_PAGES = [URL_BONDS, "https://tradingeconomics.com/country-list/government-bond-yield"] + [
     f"{URL_BONDS}?continent={c}"
     for c in ("europe", "asia", "america", "africa", "australia")
 ]
@@ -54,26 +51,42 @@ FALLBACK_YIELDS = {
     "Canada": 3.7, "Germany": 3.3, "Japan": 2.6, "China": 1.6,
     "Switzerland": 0.4,
 }
-FALLBACK_TAX_TEXT = """
-France 36.1, Argentina 35.0, Germany 30.1, Australia 30.0, Kenya 30.0,
-Mexico 30.0, Nigeria 30.0, Senegal 30.0, Zambia 30.0, Japan 29.7,
-Portugal 29.5, Peru 29.5, Pakistan 29.0, Congo 28.0, New Zealand 28.0,
-Italy 27.8, South Korea 27.5, Chile 27.0, Dominican Republic 27.0,
-South Africa 27.0, Greenland 26.5, Canada 26.0, Netherlands 25.8,
-United States 25.5, India 25.2, Angola 25.0, Belgium 25.0, China 25.0,
-Spain 25.0, United Kingdom 25.0, Jamaica 25.0, Monaco 25.0, Panama 25.0,
-Philippines 25.0, Uruguay 25.0, Turkey 25.0, Malaysia 24.0, Slovakia 24.0,
-Luxembourg 23.9, Austria 23.0, Israel 23.0, Egypt 22.5, Botswana 22.0,
-Denmark 22.0, Greece 22.0, Indonesia 22.0, Norway 22.0, Slovenia 22.0,
-Estonia 22.0, Czech Republic 21.0, Sweden 20.6, Cabo Verde 20.4,
-Iceland 20.0, Azerbaijan 20.0, Finland 20.0, Jordan 20.0, Kazakhstan 20.0,
-Latvia 20.0, Saudi Arabia 20.0, Thailand 20.0, Vietnam 20.0, Tunisia 20.0,
-Switzerland 19.5, Poland 19.0, Brunei 18.5, Armenia 18.0, Croatia 18.0,
-Ukraine 18.0, Singapore 17.0, Lithuania 17.0, Hong Kong 16.5, Romania 16.0,
-Albania 15.0, Georgia 15.0, Kuwait 15.0, Ireland 12.5, Macau 12.0,
-Bulgaria 10.0, Paraguay 10.0, Qatar 10.0, United Arab Emirates 9.0,
-Hungary 9.0
-"""
+# Raw data: OECD Corporate Tax Statistics 2024, Table II.1 (Figure 2.1), statutory corporate
+# income tax rates for 2024 in percent (combined central and sub-central).
+# File: https://stat.link/0qkxo1 (version 1, updated 11-Jul-2024).
+EMBEDDED_TAX = {
+    "Anguilla": 0, "Bahrain": 0, "Bahamas": 0, "Belize": 0, "Bermuda": 0, "Cayman Islands": 0,
+    "Guernsey": 0, "Isle of Man": 0, "Jersey": 0, "Turks and Caicos Islands": 0,
+    "British Virgin Islands": 0, "United Arab Emirates": 9, "Barbados": 9, "Hungary": 9,
+    "Andorra": 10, "Bulgaria": 10, "Bosnia and Herzegovina": 10, "North Macedonia": 10,
+    "Paraguay": 10, "Qatar": 10, "Macau": 12, "Gibraltar": 12.5, "Ireland": 12.5,
+    "Liechtenstein": 12.5, "Albania": 15, "Georgia": 15, "Kuwait": 15, "Lithuania": 15,
+    "Maldives": 15, "Montenegro": 15, "Mauritius": 15, "Oman": 15, "Serbia": 15, "Tunisia": 15,
+    "Uzbekistan": 15, "Romania": 16, "Hong Kong": 16.5, "Singapore": 17, "San Marino": 17,
+    "Armenia": 18, "Faroe Islands": 18, "Croatia": 18, "Ukraine": 18, "Brunei": 18.5,
+    "Poland": 19, "Switzerland": 19.6081, "Azerbaijan": 20, "Cook Islands": 20, "Estonia": 20,
+    "Finland": 20, "Jordan": 20, "Kazakhstan": 20, "Latvia": 20, "Saudi Arabia": 20,
+    "Thailand": 20, "Turkey": 20, "Vietnam": 20, "Sweden": 20.6, "Czech Republic": 21,
+    "Iceland": 21, "Slovakia": 21, "Aruba": 22, "Botswana": 22, "Curacao": 22, "Denmark": 22,
+    "Greece": 22, "Indonesia": 22, "Norway": 22, "Slovenia": 22, "Cabo Verde": 22.44,
+    "Egypt": 22.5, "Austria": 23, "Israel": 23, "Malaysia": 24, "Luxembourg": 24.94,
+    "Angola": 25, "Antigua and Barbuda": 25, "Belgium": 25, "China": 25, "Ivory Coast": 25,
+    "Djibouti": 25, "Dominica": 25, "Spain": 25, "United Kingdom": 25, "Jamaica": 25,
+    "Saint Kitts and Nevis": 25, "Liberia": 25, "Monaco": 25, "Mongolia": 25, "Mauritania": 25,
+    "Panama": 25, "Philippines": 25, "Sierra Leone": 25, "Seychelles": 25, "Uruguay": 25,
+    "India": 25.17, "United States": 25.6314, "Netherlands": 25.8, "France": 25.825,
+    "Canada": 26.14, "South Korea": 26.4, "Greenland": 26.5, "Chile": 27,
+    "Dominican Republic": 27, "Togo": 27, "Samoa": 27, "South Africa": 27,
+    "Burkina Faso": 27.5, "Eswatini": 27.5, "Italy": 27.81, "Congo": 28, "Grenada": 28,
+    "New Zealand": 28, "Saint Vincent and the Grenadines": 28, "Pakistan": 29, "Peru": 29.5,
+    "Japan": 29.74, "Germany": 29.9271, "Argentina": 30, "Australia": 30, "Benin": 30,
+    "Democratic Republic of the Congo": 30, "Costa Rica": 30, "Gabon": 30, "Honduras": 30,
+    "Haiti": 30, "Kenya": 30, "Saint Lucia": 30, "Sri Lanka": 30, "Mexico": 30,
+    "Montserrat": 30, "Nigeria": 30, "Papua New Guinea": 30, "Senegal": 30,
+    "Trinidad and Tobago": 30, "Zambia": 30, "Portugal": 31.5, "Morocco": 32, "Namibia": 32,
+    "Cameroon": 33, "Brazil": 34, "Colombia": 35, "Malta": 35,
+}
+TAX_ASOF = "2024 statutory rates (OECD Table II.1; file updated 11 Jul 2024)"
 
 ALIASES = {
     "u.s.": "united states", "us": "united states", "usa": "united states",
@@ -116,10 +129,6 @@ def to_float(x):
 from html.parser import HTMLParser
 
 URL_BETAS_HTML = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html"
-URL_OECD_SDMX = (
-    "https://sdmx.oecd.org/public/rest/data/OECD.CTP.TPS,DSD_TAX_CIT@DF_CIT/all"
-    "?startPeriod=2020&format=csvfilewithlabels"
-)
 BROWSER_HEADERS = {
     **UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -264,88 +273,12 @@ def fetch_betas():
     return live_or_fallback(_betas_live, fb)
 
 
-# ---- 2. Corporate tax rates -----------------------------------------
-def _tax_from_page():
-    r = http_get(URL_OECD, referer="https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en.html")
-    best = None
-    for rows in parse_tables(r.text):
-        if len(rows) < 20:
-            continue
-        years = {}
-        for j, c in enumerate(rows[0]):
-            m = re.search(r"\b(20\d\d)\b", c)
-            if m:
-                years[j] = int(m.group(1))
-        if years:
-            j = max(years, key=years.get)
-            if best is None or years[j] > best[1]:
-                best = (rows, years[j], j)
-    if best is None:
-        raise ValueError("No tax table found on the OECD page.")
-    rows, year, j = best
-    out = {}
-    for row in rows[1:]:
-        if len(row) > j:
-            val = to_float(row[j])
-            if val is not None:
-                out[norm(row[0])] = val
-    if len(out) < 20:
-        raise ValueError("OECD page table gave too few rows.")
-    return out, f"Statutory rate, {year} (OECD report page)"
-
-
-def _tax_from_sdmx():
-    r = http_get(URL_OECD_SDMX, accept="text/csv,*/*")
-    df = pd.read_csv(io.StringIO(r.text))
-    cols = list(df.columns)
-    lower = {c: str(c).lower() for c in cols}
-    area = next((c for c in cols if lower[c] in ("reference area", "ref_area: reference area")), None) \
-        or next((c for c in cols if "reference area" in lower[c]), None)
-    time_c = next((c for c in cols if lower[c].startswith("time_period") or lower[c] == "time period"), None)
-    val_c = next((c for c in cols if lower[c].startswith("obs_value") or lower[c] == "observation value"), None)
-    if not (area and time_c and val_c):
-        raise ValueError("Unexpected OECD SDMX columns: " + ", ".join(map(str, cols))[:200])
-    text_cols = [c for c in cols if df[c].dtype == object and c != area]
-    mask = pd.Series(False, index=df.index)
-    for c in text_cols:
-        mask |= df[c].astype(str).str.contains("combined", case=False, na=False)
-    d = df[mask].copy()
-    if d.empty:
-        raise ValueError("No combined CIT rate rows in the OECD SDMX data.")
-    d[val_c] = pd.to_numeric(d[val_c], errors="coerce")
-    d = d.dropna(subset=[val_c]).sort_values(time_c)
-    latest = d.groupby(area).tail(1)
-    scale = 100.0 if latest[val_c].max() <= 1.0 else 1.0
-    out = {norm(a): float(v) * scale for a, v in zip(latest[area], latest[val_c])}
-    if len(out) < 20:
-        raise ValueError("OECD SDMX data gave too few countries.")
-    year = int(pd.to_numeric(latest[time_c], errors="coerce").max())
-    return out, f"Combined statutory CIT rate, {year} (OECD Data Explorer)"
-
-
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _tax_live():
-    errors = []
-    for fn in (_tax_from_page, _tax_from_sdmx):
-        try:
-            out, asof = fn()
-            return {"ok": True, "tax": out, "asof": asof,
-                    "fetched": now_utc(), "error": None}
-        except Exception as exc:
-            errors.append(f"{fn.__name__}: {type(exc).__name__}: {str(exc)[:150]}")
-    raise RuntimeError(" | ".join(errors))
-
-
+# ---- 2. Corporate tax rates (embedded OECD raw data) ----------------
 def fetch_tax():
-    def fb():
-        out = {}
-        for item in FALLBACK_TAX_TEXT.replace("\n", " ").split(","):
-            item = item.strip()
-            if item:
-                name, val = item.rsplit(" ", 1)
-                out[norm(name)] = float(val)
-        return {"tax": out, "asof": "Case Packet 2026, OECD 2026 (fallback)"}
-    return live_or_fallback(_tax_live, fb)
+    """Tax rates come from the OECD Excel file embedded in this app."""
+    return {"ok": True, "embedded": True,
+            "tax": {norm(k): float(v) for k, v in EMBEDDED_TAX.items()},
+            "asof": TAX_ASOF, "fetched": "n/a (embedded raw data)", "error": None}
 
 
 # ---- 3. BBB spread ---------------------------------------------------
@@ -383,12 +316,12 @@ def _yields_live():
             continue
         for rows in parse_tables(r.text):
             hdr_i = next((i for i, row in enumerate(rows)
-                          if any(c.strip().lower() == "yield" for c in row)), None)
+                          if any(c.strip().lower() in ("yield", "last") for c in row)), None)
             if hdr_i is None:
                 continue
             hdr = [c.strip().lower() for c in rows[hdr_i]]
-            yi = hdr.index("yield")
-            di = hdr.index("date") if "date" in hdr else None
+            yi = hdr.index("yield") if "yield" in hdr else hdr.index("last")
+            di = next((k for k, h in enumerate(hdr) if h in ("date", "reference")), None)
             for row in rows[hdr_i + 1:]:
                 if len(row) <= yi:
                     continue
@@ -403,6 +336,16 @@ def _yields_live():
     return {"ok": True, "yields": out,
             "asof": "Latest quotes on page" + (f" (e.g. {dates[0]})" if dates else ""),
             "fetched": now_utc(), "error": None}
+
+
+def parse_pasted_yields(text):
+    """Read lines such as 'Brazil 14.70' or 'Brazil<TAB>14.70<TAB>...'."""
+    out = {}
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*([A-Za-z][A-Za-z .'()&-]*?)[\s,;|:]+(-?\d+(?:\.\d+)?)", line)
+        if m:
+            out[m.group(1).strip()] = float(m.group(2))
+    return out
 
 
 def fetch_yields():
@@ -461,7 +404,18 @@ sb.caption("Data fetch time: " + yields["fetched"])
 for label, src in (("Betas", betas), ("Tax rates", taxes),
                    ("BBB spread", spread), ("Bond yields", yields)):
     if not src["ok"]:
-        sb.warning(f"{label}: live fetch failed. Fallback data is in use.")
+        extra = " You can paste yields below." if label == "Bond yields" else ""
+        sb.warning(f"{label}: live fetch failed. Fallback data is in use." + extra)
+sb.caption("Tax rates: OECD 2024 file, embedded in the app.")
+with sb.expander("Paste bond yields (optional)"):
+    st.caption("Copy the table from Trading Economics and paste it here. "
+               "One country per line, for example: Brazil 14.70. "
+               "Pasted rows replace the same countries in the data below.")
+    pasted_text = st.text_area("Country and 10-year yield (%)", key="paste_yields", height=140)
+pasted_map = parse_pasted_yields(pasted_text)
+if pasted_map:
+    yields = {**yields, "yields": {**yields["yields"], **pasted_map},
+              "asof": yields["asof"] + f" + {len(pasted_map)} pasted rows"}
 
 sb.header("Selections")
 sb.caption("Fetched values are in use. Switch on an Override box to enter your own value.")
@@ -617,7 +571,7 @@ with tab_assume:
         ["Unlevered industry betas", "Damodaran (NYU Stern)", URL_BETAS,
          betas["asof"], betas["fetched"], "Live" if betas["ok"] else "Fallback"],
         ["Corporate tax rates", "OECD", URL_OECD,
-         taxes["asof"], taxes["fetched"], "Live" if taxes["ok"] else "Fallback"],
+         taxes["asof"], taxes["fetched"], "Embedded file"],
         ["BBB (Baa2) USD spread", "Damodaran (NYU Stern)", URL_RATINGS,
          spread["asof"], spread["fetched"], "Live" if spread["ok"] else "Fallback"],
         ["10-year government yields", "Trading Economics", URL_BONDS,
