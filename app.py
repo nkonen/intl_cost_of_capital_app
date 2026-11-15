@@ -309,35 +309,7 @@ for label, src in (("Betas", betas), ("Tax rates", taxes),
         sb.warning(f"{label}: live fetch failed. Fallback data is in use.")
 
 sb.header("Selections")
-industries = sorted(betas["df"]["Industry Name"].tolist())
-ind_index = industries.index(DEFAULT_INDUSTRY) if DEFAULT_INDUSTRY in industries else 0
-industry = sb.selectbox("Industry", industries, index=ind_index)
-
-yield_map = {norm(k): v for k, v in yields["yields"].items()}
-display_names = {norm(k): k for k in yields["yields"]}
-display_names["united states"] = "United States"
-countries = sorted(display_names.values())
-c_index = countries.index(DEFAULT_COUNTRY) if DEFAULT_COUNTRY in countries else 0
-country = sb.selectbox("Target country", countries, index=c_index)
-is_us = norm(country) == "united states"
-
-tax_basis = sb.radio("Project tax rate", ["United States", "Selected country"],
-                     horizontal=True)
-erp_pct = sb.number_input("Equity risk premium (%)", 0.0, 30.0, DEFAULT_ERP, 0.1)
-debt_pct = sb.slider("Target debt share (%)", 0, 90, DEFAULT_DEBT, 1)
-
-# ---- Auto values -----------------------------------------------------
-auto_beta = float(betas["df"].loc[betas["df"]["Industry Name"] == industry,
-                                  "Unlevered beta"].iloc[0])
-auto_tax_us = taxes["tax"].get("united states")
-auto_tax_fx = taxes["tax"].get(norm(country))
-auto_spread_us = spread["spread"]
-auto_yld_us = yield_map.get("united states")
-auto_yld_fx = yield_map.get(norm(country))
-
-# ---- Manual overrides ------------------------------------------------
-sb.header("Manual overrides")
-sb.caption("Switch on a box to replace the fetched value.")
+sb.caption("Fetched values are in use. Switch on an Override box to enter your own value.")
 
 
 def override(label, auto, key, lo, hi, step, fmt="%.4f", default_if_missing=0.0):
@@ -353,23 +325,58 @@ def override(label, auto, key, lo, hi, step, fmt="%.4f", default_if_missing=0.0)
     return float(base)
 
 
+# ---- 1. Industry -----------------------------------------------------
+sb.subheader("1. Industry")
+industries = sorted(betas["df"]["Industry Name"].tolist())
+ind_index = industries.index(DEFAULT_INDUSTRY) if DEFAULT_INDUSTRY in industries else 0
+industry = sb.selectbox("Industry", industries, index=ind_index)
+auto_beta = float(betas["df"].loc[betas["df"]["Industry Name"] == industry,
+                                  "Unlevered beta"].iloc[0])
 beta_u = override("unlevered beta", auto_beta, f"beta_{industry}", 0.0, 5.0, 0.01, "%.4f")
+
+# ---- 2. Target country ----------------------------------------------
+sb.divider()
+sb.subheader("2. Target country")
+yield_map = {norm(k): v for k, v in yields["yields"].items()}
+display_names = {norm(k): k for k in yields["yields"]}
+display_names["united states"] = "United States"
+countries = sorted(display_names.values())
+c_index = countries.index(DEFAULT_COUNTRY) if DEFAULT_COUNTRY in countries else 0
+country = sb.selectbox("Target country", countries, index=c_index)
+is_us = norm(country) == "united states"
+
+auto_tax_us = taxes["tax"].get("united states")
+auto_tax_fx = taxes["tax"].get(norm(country))
+auto_yld_fx = yield_map.get(norm(country))
+
+tax_basis = sb.radio("Project tax rate", ["United States", "Selected country"],
+                     horizontal=True)
 tax_us_pct = override("U.S. tax rate (%)", auto_tax_us, "tax_us", 0.0, 60.0, 0.1, "%.2f", 25.0)
 if is_us:
     tax_fx_pct = tax_us_pct
 else:
     tax_fx_pct = override(f"{country} tax rate (%)", auto_tax_fx, f"tax_{country}",
                           0.0, 60.0, 0.1, "%.2f", 25.0)
-spread_us_pct = override("USD BBB spread (%)", auto_spread_us, "spread_us", 0.0, 20.0, 0.01, "%.4f", FALLBACK_SPREAD)
-yld_us_pct = override("U.S. 10-year yield (%)", auto_yld_us, "yld_us", -2.0, 50.0, 0.01, "%.2f", 4.0)
-if is_us:
-    yld_fx_pct = yld_us_pct
-else:
     yld_fx_pct = override(f"{country} 10-year yield (%)", auto_yld_fx, f"yld_{country}",
                           -2.0, 100.0, 0.01, "%.2f", 5.0)
 
+# ---- 3. Risk information --------------------------------------------
+sb.divider()
+sb.subheader("3. Risk information")
+erp_pct = sb.number_input("Equity risk premium (%)", 0.0, 30.0, DEFAULT_ERP, 0.1)
+debt_pct = sb.slider("Target debt share (%)", 0, 90, DEFAULT_DEBT, 1)
+auto_yld_us = yield_map.get("united states")
+yld_us_pct = override("U.S. 10-year yield (%)", auto_yld_us, "yld_us", -2.0, 50.0, 0.01, "%.2f", 4.0)
+if is_us:
+    yld_fx_pct = yld_us_pct
+
 tax_used_pct = tax_us_pct if tax_basis == "United States" else tax_fx_pct
 
+# ---- 4. Spread information ------------------------------------------
+sb.divider()
+sb.subheader("4. Spread information")
+spread_us_pct = override("USD BBB spread (%)", spread["spread"], "spread_us", 0.0, 20.0, 0.01,
+                         "%.4f", FALLBACK_SPREAD)
 # Foreign-currency spread: automatic unless the user overrides it.
 f_auto = (1 + yld_fx_pct / 100) / (1 + yld_us_pct / 100)
 auto_spread_fx_pct = spread_us_pct * f_auto
@@ -379,7 +386,8 @@ if fx_spread_on:
         "Foreign-currency spread (%)", 0.0, 50.0, round(auto_spread_fx_pct, 4), 0.01,
         format="%.4f", key=f"in_spreadfx_{round(auto_spread_fx_pct, 4)}")
 else:
-    sb.number_input("Foreign-currency spread (%)", value=round(auto_spread_fx_pct, 4),
+    sb.number_input("Foreign-currency spread (%), automatic",
+                    value=round(auto_spread_fx_pct, 4),
                     format="%.4f", disabled=True,
                     key=f"dis_spreadfx_{round(auto_spread_fx_pct, 4)}")
     spread_fx_pct = None
@@ -393,23 +401,31 @@ params = dict(
 spread_fx = None if spread_fx_pct is None else spread_fx_pct / 100
 res = compute(**params, spread_fx=spread_fx)
 
-tab_res, tab_all, tab_assume, tab_ver = st.tabs(
-    ["Results", "All industries", "Assumptions and sources", "Verification"]
+tab_res, tab_assume, tab_ver = st.tabs(
+    ["Results", "Assumptions and sources", "Verification"]
 )
 
 # ---- Results tab -----------------------------------------------------
 with tab_res:
+    usd_label = "USD (U.S. dollar)"
+    fx_label = f"Foreign currency ({country})"
+
     st.subheader(f"{industry}: {country}")
     st.write(f"Project tax rate: **{tax_used_pct:.2f}%** ({tax_basis}). "
              f"Debt share: **{debt_pct}%**. Equity risk premium: **{erp_pct:.2f}%**.")
+    st.markdown(f"**Left side = {usd_label}. Right side = {fx_label}.**")
     if is_us:
-        st.info("The selected country is the United States. Both columns show the same result.")
+        st.info("The selected country is the United States. Both sides show the same result.")
 
     c1, c2 = st.columns(2)
-    c1.metric("WACC (USD)", pct(res["wacc_usd"]))
-    c2.metric(f"WACC ({country} currency)", pct(res["wacc_fx"]))
-    c1.metric("Cost of equity (USD)", pct(res["re_usd"]))
-    c2.metric(f"Cost of equity ({country} currency)", pct(res["re_fx"]))
+    with c1.container(border=True):
+        st.markdown(f"### {usd_label}")
+        st.metric("Cost of equity (USD)", pct(res["re_usd"]))
+        st.metric("WACC (USD)", pct(res["wacc_usd"]))
+    with c2.container(border=True):
+        st.markdown(f"### {fx_label}")
+        st.metric(f"Cost of equity ({country} currency)", pct(res["re_fx"]))
+        st.metric(f"WACC ({country} currency)", pct(res["wacc_fx"]))
 
     rows = [
         ("Unlevered beta", f"{beta_u:.4f}", f"{beta_u:.4f}"),
@@ -425,7 +441,7 @@ with tab_res:
         ("Tax rate", pct(params["tax"], 2), pct(params["tax"], 2)),
         ("WACC", pct(res["wacc_usd"], 4), pct(res["wacc_fx"], 4)),
     ]
-    table = pd.DataFrame(rows, columns=["Item", "USD", f"{country} currency"]).set_index("Item")
+    table = pd.DataFrame(rows, columns=["Item", usd_label, fx_label]).set_index("Item")
     st.table(table)
     st.caption(f"Conversion factor F = (1 + {country} yield) / (1 + U.S. yield) = {res['factor']:.6f}")
 
@@ -438,27 +454,6 @@ with tab_res:
     })
     csv = out.to_csv(index=False) + "\n" + inputs.to_csv(index=False)
     st.download_button("Download results (CSV)", csv, "cost_of_capital_results.csv", "text/csv")
-
-# ---- All industries tab ---------------------------------------------
-with tab_all:
-    st.subheader("All industries, current settings")
-    st.caption("Each row uses the fetched unlevered beta for that industry. "
-               "The beta override applies only to the selected industry.")
-    recs = []
-    for _, row in betas["df"].iterrows():
-        name = row["Industry Name"]
-        bu = beta_u if name == industry else float(row["Unlevered beta"])
-        r = compute(**{**params, "beta_u": bu}, spread_fx=spread_fx)
-        recs.append({
-            "Industry": name, "Unlevered beta": bu, "Levered beta": r["beta_e"],
-            "Cost of equity USD (%)": r["re_usd"] * 100, "WACC USD (%)": r["wacc_usd"] * 100,
-            "Cost of equity foreign (%)": r["re_fx"] * 100, "WACC foreign (%)": r["wacc_fx"] * 100,
-        })
-    alldf = pd.DataFrame(recs).sort_values("WACC USD (%)", ascending=False).reset_index(drop=True)
-    st.dataframe(alldf.round(4), use_container_width=True, hide_index=True)
-    st.bar_chart(alldf.set_index("Industry")[["WACC USD (%)", "WACC foreign (%)"]])
-    st.download_button("Download all industries (CSV)", alldf.round(6).to_csv(index=False),
-                       "cost_of_capital_all_industries.csv", "text/csv")
 
 # ---- Assumptions and sources ----------------------------------------
 with tab_assume:
