@@ -108,153 +108,308 @@ def to_float(x):
 
 
 # ----------------------------------------------------------------------
-# Data fetch (cached; the refresh button clears the cache)
+# Data fetch
+#  - No lxml or bs4 needed: a small built-in HTML table parser is used.
+#  - A live fetch that fails is NOT cached. The app tries again on the next run.
+#  - Successful fetches are cached for a few hours. The refresh button clears them.
 # ----------------------------------------------------------------------
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def fetch_betas():
-    try:
-        r = requests.get(URL_BETAS, headers=UA, timeout=30)
-        r.raise_for_status()
-        raw = pd.read_excel(
-            io.BytesIO(r.content), sheet_name="Industry Averages",
-            header=None, engine="xlrd",
-        )
-        mask = raw.apply(
-            lambda row: row.astype(str).str.strip().eq("Industry Name").any(), axis=1
-        )
-        hdr = raw.index[mask][0]
-        df = raw.iloc[hdr + 1:].copy()
-        df.columns = [str(c).strip() for c in raw.iloc[hdr]]
-        df = df.dropna(subset=["Industry Name"])
-        df["Industry Name"] = df["Industry Name"].astype(str).str.strip()
-        df["Unlevered beta"] = pd.to_numeric(df["Unlevered beta"], errors="coerce")
-        df = df.dropna(subset=["Unlevered beta"])
-        keep = [c for c in ("Industry Name", "Number of firms", "Beta",
-                            "D/E Ratio", "Effective Tax rate", "Unlevered beta")
-                if c in df.columns]
-        df = df[keep].reset_index(drop=True)
-        asof = ""
-        for v in raw.iloc[:hdr].astype(str).values.ravel():
-            if re.search(r"(date|as of|updated)", v, re.I) and v != "nan":
-                asof = v.strip()
-                break
-        return {"ok": True, "df": df, "asof": asof or "see file header",
-                "fetched": now_utc(), "error": None}
-    except Exception as exc:  # network or parse failure
-        df = pd.DataFrame(
-            {"Industry Name": list(FALLBACK_BETAS),
-             "Unlevered beta": list(FALLBACK_BETAS.values())}
-        )
-        return {"ok": False, "df": df, "asof": "Case Packet 2026 (fallback)",
-                "fetched": now_utc(), "error": str(exc)[:200]}
+from html.parser import HTMLParser
+
+URL_BETAS_HTML = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html"
+URL_OECD_SDMX = (
+    "https://sdmx.oecd.org/public/rest/data/OECD.CTP.TPS,DSD_TAX_CIT@DF_CIT/all"
+    "?startPeriod=2020&format=csvfilewithlabels"
+)
+BROWSER_HEADERS = {
+    **UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def fetch_tax():
+def http_get(url, referer=None, accept=None):
+    headers = dict(BROWSER_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    if accept:
+        headers["Accept"] = accept
+    r = requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    return r
+
+
+class _TableParser(HTMLParser):
+    """Collect HTML tables as lists of rows of cell text."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables, self._stack, self._row, self._cell = [], [], None, None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._stack.append([])
+        elif tag == "tr" and self._stack:
+            self._row = []
+        elif tag in ("td", "th") and self._stack and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None and self._stack:
+            if self._row:
+                self._stack[-1].append(self._row)
+            self._row = None
+        elif tag == "table" and self._stack:
+            self.tables.append(self._stack.pop())
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def parse_tables(html):
+    p = _TableParser()
+    p.feed(html)
+    return p.tables
+
+
+def live_or_fallback(live, fallback):
+    """Run a live fetch. On any error, return the fallback with the error text."""
     try:
-        r = requests.get(URL_OECD, headers=UA, timeout=30)
-        r.raise_for_status()
-        tables = pd.read_html(io.StringIO(r.text))
-        best = None
-        for t in tables:
-            years = {}
-            for c in t.columns:
-                m = re.search(r"(20\d\d)", str(c))
-                if m:
-                    years[c] = int(m.group(1))
-            if years and len(t) >= 20:
-                col = max(years, key=years.get)
-                if best is None or years[col] > best[1]:
-                    best = (t, years[col], col)
-        if best is None:
-            raise ValueError("No tax table found on the OECD page.")
-        t, year, col = best
-        out = {}
-        for _, row in t.iterrows():
-            val = to_float(row[col])
-            if val is not None:
-                out[norm(row.iloc[0])] = val
-        if len(out) < 20:
-            raise ValueError("OECD table parse gave too few rows.")
-        return {"ok": True, "tax": out, "asof": f"Statutory rate, {year}",
-                "fetched": now_utc(), "error": None}
+        return live()
     except Exception as exc:
+        out = fallback()
+        out.update({"ok": False, "fetched": now_utc(),
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+        return out
+
+
+# ---- 1. Betas --------------------------------------------------------
+def _betas_from_xls():
+    import xlrd  # noqa: F401  (raises ImportError if the package is missing)
+    r = http_get(URL_BETAS)
+    raw = pd.read_excel(io.BytesIO(r.content), sheet_name="Industry Averages",
+                        header=None, engine="xlrd")
+    mask = raw.apply(
+        lambda row: row.astype(str).str.strip().eq("Industry Name").any(), axis=1)
+    hdr = raw.index[mask][0]
+    df = raw.iloc[hdr + 1:].copy()
+    df.columns = [str(c).strip() for c in raw.iloc[hdr]]
+    df = df.dropna(subset=["Industry Name"])
+    df["Industry Name"] = df["Industry Name"].astype(str).str.strip()
+    df["Unlevered beta"] = pd.to_numeric(df["Unlevered beta"], errors="coerce")
+    df = df.dropna(subset=["Unlevered beta"])
+    keep = [c for c in ("Industry Name", "Number of firms", "Beta", "D/E Ratio",
+                        "Effective Tax rate", "Unlevered beta") if c in df.columns]
+    asof = ""
+    for v in raw.iloc[:hdr].astype(str).values.ravel():
+        if re.search(r"(date|as of|updated)", v, re.I) and v != "nan":
+            asof = v.strip()
+            break
+    return df[keep].reset_index(drop=True), asof or "see file header", "betas.xls"
+
+
+def _betas_from_html():
+    r = http_get(URL_BETAS_HTML)
+    for rows in parse_tables(r.text):
+        for i, row in enumerate(rows):
+            low = [c.strip().lower() for c in row]
+            if "industry name" in low and "unlevered beta" in low:
+                idx = {}
+                for j, c in enumerate(low):
+                    idx.setdefault(c, j)
+                names = {"Industry Name": "industry name", "Number of firms": "number of firms",
+                         "Beta": "beta", "D/E Ratio": "d/e ratio",
+                         "Effective Tax rate": "effective tax rate",
+                         "Unlevered beta": "unlevered beta"}
+                recs = []
+                for data in rows[i + 1:]:
+                    rec = {}
+                    for out_name, key in names.items():
+                        j = idx.get(key)
+                        if j is None or j >= len(data):
+                            continue
+                        rec[out_name] = (data[j].strip() if out_name == "Industry Name"
+                                         else to_float(data[j]))
+                    if rec.get("Industry Name") and rec.get("Unlevered beta") is not None:
+                        recs.append(rec)
+                if len(recs) >= 20:
+                    m = re.search(r"(Data used is as of[^<\n]{0,40}|Date of [Aa]nalysis[^<\n]{0,60})",
+                                  r.text)
+                    return pd.DataFrame(recs), (m.group(1).strip() if m else "see page header"), "Betas.html"
+    raise ValueError("Industry table not found on the Damodaran beta page.")
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _betas_live():
+    errors = []
+    for fn in (_betas_from_xls, _betas_from_html):
+        try:
+            df, asof, via = fn()
+            return {"ok": True, "df": df, "asof": f"{asof} (via {via})",
+                    "fetched": now_utc(), "error": None}
+        except Exception as exc:
+            errors.append(f"{fn.__name__}: {type(exc).__name__}: {str(exc)[:150]}")
+    raise RuntimeError(" | ".join(errors))
+
+
+def fetch_betas():
+    def fb():
+        df = pd.DataFrame({"Industry Name": list(FALLBACK_BETAS),
+                           "Unlevered beta": list(FALLBACK_BETAS.values())})
+        return {"df": df, "asof": "Case Packet 2026 (fallback)"}
+    return live_or_fallback(_betas_live, fb)
+
+
+# ---- 2. Corporate tax rates -----------------------------------------
+def _tax_from_page():
+    r = http_get(URL_OECD, referer="https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en.html")
+    best = None
+    for rows in parse_tables(r.text):
+        if len(rows) < 20:
+            continue
+        years = {}
+        for j, c in enumerate(rows[0]):
+            m = re.search(r"\b(20\d\d)\b", c)
+            if m:
+                years[j] = int(m.group(1))
+        if years:
+            j = max(years, key=years.get)
+            if best is None or years[j] > best[1]:
+                best = (rows, years[j], j)
+    if best is None:
+        raise ValueError("No tax table found on the OECD page.")
+    rows, year, j = best
+    out = {}
+    for row in rows[1:]:
+        if len(row) > j:
+            val = to_float(row[j])
+            if val is not None:
+                out[norm(row[0])] = val
+    if len(out) < 20:
+        raise ValueError("OECD page table gave too few rows.")
+    return out, f"Statutory rate, {year} (OECD report page)"
+
+
+def _tax_from_sdmx():
+    r = http_get(URL_OECD_SDMX, accept="text/csv,*/*")
+    df = pd.read_csv(io.StringIO(r.text))
+    cols = list(df.columns)
+    lower = {c: str(c).lower() for c in cols}
+    area = next((c for c in cols if lower[c] in ("reference area", "ref_area: reference area")), None) \
+        or next((c for c in cols if "reference area" in lower[c]), None)
+    time_c = next((c for c in cols if lower[c].startswith("time_period") or lower[c] == "time period"), None)
+    val_c = next((c for c in cols if lower[c].startswith("obs_value") or lower[c] == "observation value"), None)
+    if not (area and time_c and val_c):
+        raise ValueError("Unexpected OECD SDMX columns: " + ", ".join(map(str, cols))[:200])
+    text_cols = [c for c in cols if df[c].dtype == object and c != area]
+    mask = pd.Series(False, index=df.index)
+    for c in text_cols:
+        mask |= df[c].astype(str).str.contains("combined", case=False, na=False)
+    d = df[mask].copy()
+    if d.empty:
+        raise ValueError("No combined CIT rate rows in the OECD SDMX data.")
+    d[val_c] = pd.to_numeric(d[val_c], errors="coerce")
+    d = d.dropna(subset=[val_c]).sort_values(time_c)
+    latest = d.groupby(area).tail(1)
+    scale = 100.0 if latest[val_c].max() <= 1.0 else 1.0
+    out = {norm(a): float(v) * scale for a, v in zip(latest[area], latest[val_c])}
+    if len(out) < 20:
+        raise ValueError("OECD SDMX data gave too few countries.")
+    year = int(pd.to_numeric(latest[time_c], errors="coerce").max())
+    return out, f"Combined statutory CIT rate, {year} (OECD Data Explorer)"
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _tax_live():
+    errors = []
+    for fn in (_tax_from_page, _tax_from_sdmx):
+        try:
+            out, asof = fn()
+            return {"ok": True, "tax": out, "asof": asof,
+                    "fetched": now_utc(), "error": None}
+        except Exception as exc:
+            errors.append(f"{fn.__name__}: {type(exc).__name__}: {str(exc)[:150]}")
+    raise RuntimeError(" | ".join(errors))
+
+
+def fetch_tax():
+    def fb():
         out = {}
         for item in FALLBACK_TAX_TEXT.replace("\n", " ").split(","):
             item = item.strip()
             if item:
                 name, val = item.rsplit(" ", 1)
                 out[norm(name)] = float(val)
-        return {"ok": False, "tax": out, "asof": "Case Packet 2026, OECD 2026 (fallback)",
-                "fetched": now_utc(), "error": str(exc)[:200]}
+        return {"tax": out, "asof": "Case Packet 2026, OECD 2026 (fallback)"}
+    return live_or_fallback(_tax_live, fb)
 
 
+# ---- 3. BBB spread ---------------------------------------------------
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _spread_live():
+    r = http_get(URL_RATINGS)
+    for rows in parse_tables(r.text):
+        for row in rows:
+            for i, c in enumerate(row):
+                if "Baa2/BBB" in c and i + 1 < len(row):
+                    val = to_float(row[i + 1])
+                    if val is not None:
+                        return {"ok": True, "spread": val,
+                                "asof": "Large non-financial service firms, Baa2/BBB",
+                                "fetched": now_utc(), "error": None}
+    raise ValueError("Baa2/BBB row not found on the Damodaran ratings page.")
+
+
 def fetch_spread():
-    try:
-        r = requests.get(URL_RATINGS, headers=UA, timeout=30)
-        r.raise_for_status()
-        for t in pd.read_html(io.StringIO(r.text)):
-            for _, row in t.iterrows():
-                cells = [str(c) for c in row.values]
-                for i, c in enumerate(cells):
-                    if "Baa2/BBB" in c and i + 1 < len(cells):
-                        val = to_float(cells[i + 1])
-                        if val is not None:
-                            return {"ok": True, "spread": val,
-                                    "asof": "Large non-financial service firms, Baa2/BBB",
-                                    "fetched": now_utc(), "error": None}
-        raise ValueError("Baa2/BBB row not found.")
-    except Exception as exc:
-        return {"ok": False, "spread": FALLBACK_SPREAD,
-                "asof": "Case Packet 2026 example (fallback)",
-                "fetched": now_utc(), "error": str(exc)[:200]}
+    return live_or_fallback(
+        _spread_live,
+        lambda: {"spread": FALLBACK_SPREAD, "asof": "Case Packet 2026 example (fallback)"})
 
 
+# ---- 4. Government bond yields --------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_yields():
-    out, dates = {}, []
-    try:
-        for url in TE_PAGES:
-            try:
-                r = requests.get(url, headers=UA, timeout=30)
-                r.raise_for_status()
-                tables = pd.read_html(io.StringIO(r.text))
-            except Exception:
+def _yields_live():
+    out, dates, errors = {}, [], []
+    for url in TE_PAGES:
+        try:
+            r = http_get(url, referer="https://tradingeconomics.com/")
+        except Exception as exc:
+            errors.append(f"{url.split('tradingeconomics.com')[-1] or '/bonds'}: "
+                          f"{type(exc).__name__}: {str(exc)[:80]}")
+            continue
+        for rows in parse_tables(r.text):
+            hdr_i = next((i for i, row in enumerate(rows)
+                          if any(c.strip().lower() == "yield" for c in row)), None)
+            if hdr_i is None:
                 continue
-            for t in tables:
-                cols = [str(c).strip() for c in t.columns]
-                if "Yield" not in cols:
+            hdr = [c.strip().lower() for c in rows[hdr_i]]
+            yi = hdr.index("yield")
+            di = hdr.index("date") if "date" in hdr else None
+            for row in rows[hdr_i + 1:]:
+                if len(row) <= yi:
                     continue
-                ycol = t.columns[cols.index("Yield")]
-                name_col = None
-                for c in t.columns:
-                    if c == ycol:
-                        break
-                    s = t[c].astype(str)
-                    if s.str.contains(r"[A-Za-z]{3}").mean() > 0.8:
-                        name_col = c
-                        break
-                if name_col is None:
-                    continue
-                dcol = t.columns[cols.index("Date")] if "Date" in cols else None
-                for _, row in t.iterrows():
-                    name = str(row[name_col]).strip()
-                    y = to_float(row[ycol])
-                    if y is not None and name and name != "nan":
-                        out.setdefault(name, y)
-                        if dcol is not None:
-                            dates.append(str(row[dcol]))
-        if len(out) < 5:
-            raise ValueError("Trading Economics parse gave too few countries.")
-        return {"ok": True, "yields": out,
-                "asof": "Latest quotes on page" + (f" (e.g. {dates[0]})" if dates else ""),
-                "fetched": now_utc(), "error": None}
-    except Exception as exc:
-        return {"ok": False, "yields": dict(FALLBACK_YIELDS),
-                "asof": "Case Packet 2026, 6 Nov 2026 (fallback)",
-                "fetched": now_utc(), "error": str(exc)[:200]}
+                name = next((c for c in row[:yi] if len(re.findall(r"[A-Za-z]", c)) >= 3), None)
+                y = to_float(row[yi])
+                if name and y is not None:
+                    out.setdefault(name.strip(), y)
+                    if di is not None and len(row) > di:
+                        dates.append(row[di])
+    if len(out) < 5:
+        raise ValueError("Too few countries parsed. " + "; ".join(errors[:3]))
+    return {"ok": True, "yields": out,
+            "asof": "Latest quotes on page" + (f" (e.g. {dates[0]})" if dates else ""),
+            "fetched": now_utc(), "error": None}
 
+
+def fetch_yields():
+    return live_or_fallback(
+        _yields_live,
+        lambda: {"yields": dict(FALLBACK_YIELDS),
+                 "asof": "Case Packet 2026, 6 Nov 2026 (fallback)"})
 
 # ----------------------------------------------------------------------
 # Calculation. All rates are decimals (0.05 = 5%).
