@@ -119,4 +119,4 @@ EMBEDDED_TAX = {
     "Liechtenstein": 12.5, "Albania": 15, "Georgia": 15, "Kuwait": 15, "Lithuania": 15,
     "Maldives": 15, "Montenegro": 15, "Mauritius": 15, "Oman": 15, "Serbia": 15, "Tunisia": 15,
     "Uzbekistan": 15, "Romania": 16, "Hong Kong": 16.5, "Singapore": 17, "San Marino": 17,
-    "Armenia": 18, "Faroe Islands": 1
+    "Armenia": 18, "Faroe Islands": 1}
