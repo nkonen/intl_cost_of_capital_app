@@ -14,6 +14,7 @@ import io
 import re
 from datetime import datetime, timezone
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -364,7 +365,6 @@ for label, src in (("Betas", betas), ("BBB spread", spread)):
 sb.caption("Tax rates (OECD 2024 file) and bond yields (6 Nov 2026) are embedded data.")
 
 sb.header("Selections")
-sb.caption("Each box starts with the fetched value. Type in any box to change it.")
 missing = []
 
 
@@ -512,6 +512,32 @@ with tab_res:
     })
     csv = out.to_csv(index=False) + "\n" + inputs.to_csv(index=False)
     st.download_button("Download results (CSV)", csv, "cost_of_capital_results.csv", "text/csv")
+
+    # WACC as the unlevered beta changes
+    st.subheader("WACC as the unlevered beta changes")
+    top = max(2.0, round(beta_u * 1.5, 1))
+    n_pts = int(round(top / 0.05))
+    betas_grid = [i * 0.05 for i in range(n_pts + 1)]
+    rows_c = []
+    for b in betas_grid:
+        r = compute(**{**params, "beta_u": b}, spread_fx=spread_fx)
+        rows_c.append({"Unlevered beta": b, "WACC (USD)": r["wacc_usd"] * 100,
+                       f"WACC* ({country} currency)": r["wacc_fx"] * 100})
+    chart_df = pd.DataFrame(rows_c).melt("Unlevered beta", var_name="Series",
+                                         value_name="WACC (%)")
+    line = alt.Chart(chart_df).mark_line(strokeWidth=2.5).encode(
+        x=alt.X("Unlevered beta:Q", title="Unlevered beta"),
+        y=alt.Y("WACC (%):Q", title="WACC (%)", scale=alt.Scale(zero=False)),
+        color=alt.Color("Series:N", title=None, legend=alt.Legend(orient="bottom")),
+        tooltip=["Series", alt.Tooltip("Unlevered beta:Q", format=".2f"),
+                 alt.Tooltip("WACC (%):Q", format=".2f")],
+    )
+    now_df = pd.DataFrame({"Unlevered beta": [beta_u]})
+    rule = alt.Chart(now_df).mark_rule(strokeDash=[5, 4], color="gray").encode(
+        x="Unlevered beta:Q")
+    st.altair_chart((line + rule).properties(height=340), use_container_width=True)
+    st.caption(f"Dashed line = current unlevered beta ({beta_u:.2f}). "
+               "All other inputs stay at the values selected in the sidebar.")
 
 # ---- Assumptions and sources ----------------------------------------
 with tab_assume:
