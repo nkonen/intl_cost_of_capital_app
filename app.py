@@ -536,8 +536,8 @@ params = dict(
 spread_fx = None if spread_fx_pct is None else spread_fx_pct / 100
 res = compute(**params, spread_fx=spread_fx)
 
-tab_res, tab_assume, tab_ver = st.tabs(
-    ["Results", "Assumptions and sources", "Verification"]
+tab_res, tab_assume = st.tabs(
+    ["Results", "Assumptions and sources"]
 )
 
 # ---- Results tab -----------------------------------------------------
@@ -628,66 +628,5 @@ with tab_assume:
 - **Foreign spread.** The box starts at `s* = s × (1 + Rf*) / (1 + Rf)`. You can type another value. This does not change USD results.
 - **Government yields** include liquidity and term premia. They can include sovereign default risk.
 - **Currency risk.** Exchange-rate betas are near zero, so currency risk gets no separate premium.
-        """
-    )
-
-# ---- Verification ----------------------------------------------------
-with tab_ver:
-    st.subheader("Built-in checks")
-    st.caption("These checks run live with the current inputs, except check 1.")
-    tol = 1e-12
-    checks = []
-
-    # 1. Packet example (Colombia). Expected values come from the Case Packet.
-    ex = compute(beta_u=0.80, tax=0.35, erp=0.065, d=0.30, rf_us=0.04,
-                 rf_fx=0.12, spread_us=0.015)
-    exp = {"re_usd": 0.106486, "wacc_usd": 0.085265, "re_fx": 0.1916, "wacc_fx": 0.160670}
-    ok1 = all(abs(ex[k] - v) < 5e-7 for k, v in exp.items())
-    checks.append(["1. Packet example (Colombia)", "Re 10.6486%, WACC 8.5265%, Re* 19.16%, WACC* 16.0670%",
-                   f"Re {pct(ex['re_usd'], 4)}, WACC {pct(ex['wacc_usd'], 4)}, "
-                   f"Re* {pct(ex['re_fx'], 4)}, WACC* {pct(ex['wacc_fx'], 4)}", ok1])
-
-    # 2. Equal yields, spread at automatic value -> equal results.
-    eq = compute(**{**params, "rf_fx": params["rf_us"]}, spread_fx=None)
-    ok2 = (abs(eq["re_usd"] - eq["re_fx"]) < tol and abs(eq["wacc_usd"] - eq["wacc_fx"]) < tol
-           and abs(eq["rd_usd"] - eq["rd_fx"]) < tol)
-    checks.append(["2. Equal yields give equal results", "USD = foreign for Re, Rd, WACC",
-                   f"WACC {pct(eq['wacc_usd'], 6)} vs {pct(eq['wacc_fx'], 6)}", ok2])
-
-    # 3. Zero debt -> WACC = cost of equity.
-    z = compute(**{**params, "d": 0.0}, spread_fx=spread_fx)
-    ok3 = abs(z["wacc_usd"] - z["re_usd"]) < tol and abs(z["wacc_fx"] - z["re_fx"]) < tol
-    checks.append(["3. Zero debt: WACC = cost of equity", "Both currencies",
-                   f"USD {pct(z['wacc_usd'], 6)} / {pct(z['re_usd'], 6)}; "
-                   f"foreign {pct(z['wacc_fx'], 6)} / {pct(z['re_fx'], 6)}", ok3])
-
-    # 4. Overriding the foreign spread leaves USD unchanged.
-    a = compute(**params, spread_fx=None)
-    b = compute(**params, spread_fx=0.0777)
-    usd_keys = ["beta_e", "re_usd", "rd_usd", "rd_usd_at", "wacc_usd"]
-    ok4 = all(abs(a[k] - b[k]) < tol for k in usd_keys) and abs(a["wacc_fx"] - b["wacc_fx"]) > 0 \
-        if params["d"] > 0 else all(abs(a[k] - b[k]) < tol for k in usd_keys)
-    checks.append(["4. Changing the foreign spread leaves USD unchanged", "USD values identical",
-                   f"USD WACC {pct(a['wacc_usd'], 6)} vs {pct(b['wacc_usd'], 6)}", ok4])
-
-    chk = pd.DataFrame(checks, columns=["Check", "Expected", "Result", "Pass"])
-    chk["Pass"] = chk["Pass"].map({True: "PASS", False: "FAIL"})
-    st.dataframe(chk, use_container_width=True, hide_index=True)
-
-    st.subheader("Check one example by hand")
-    st.markdown(
-        """
-Use a spreadsheet or calculator. Inputs: βU 0.80, tax 35%, ERP 6.5%, debt share 30%,
-U.S. yield 4%, Colombia yield 12%, USD spread 1.5%.
-
-1. D/E = 0.30 / 0.70 = 0.4286
-2. βE = 0.80 × [1 + 0.65 × 0.4286] = 1.0229
-3. Re = 4% + 1.0229 × 6.5% = 10.6486%
-4. Rd = 4% + 1.5% = 5.5%. After tax: 5.5% × 0.65 = 3.575%
-5. WACC = 0.70 × 10.6486% + 0.30 × 3.575% = 8.5265%
-6. F = 1.12 / 1.04 = 1.076923
-7. Re* = 1.106486 × 1.076923 − 1 = 19.16%
-8. s* = 1.5% × 1.076923 = 1.6154%. Rd* = 12% + 1.6154% = 13.6154%. After tax: 8.85%
-9. WACC* = 0.70 × 19.16% + 0.30 × 8.85% = 16.0670%
         """
     )
