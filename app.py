@@ -24,11 +24,7 @@ import streamlit as st
 URL_BETAS = "https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls"
 URL_OECD = "https://stat.link/0qkxo1"  # OECD Table II.1 Excel file (embedded in this app)
 URL_RATINGS = "https://pages.stern.nyu.edu/adamodar/New_Home_Page/datafile/ratings.html"
-URL_BONDS = "https://tradingeconomics.com/bonds"
-TE_PAGES = [URL_BONDS, "https://tradingeconomics.com/country-list/government-bond-yield"] + [
-    f"{URL_BONDS}?continent={c}"
-    for c in ("europe", "asia", "america", "africa", "australia")
-]
+URL_BONDS = "https://tradingeconomics.com/bonds"  # source of the embedded yields
 UA = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -44,13 +40,17 @@ DEFAULT_DEBT = 30  # percent
 # Fallback data. Source: Case Packet 2026, part 9. Used only if a fetch fails.
 FALLBACK_BETAS = {DEFAULT_INDUSTRY: 0.80}  # illustrative (packet example)
 FALLBACK_SPREAD = 1.50  # percent (packet example)
-FALLBACK_YIELDS = {
+# Raw data: 10-year government bond yields in percent, Trading Economics,
+# as printed in Case Packet 2026, part 9 (yields dated 6 Nov 2026).
+# To add a country, add one line: "Country": yield,
+EMBEDDED_YIELDS = {
     "Brazil": 15.2, "Colombia": 12.8, "Mexico": 9.1, "India": 7.2,
     "Poland": 6.2, "United Kingdom": 5.2, "Australia": 5.0,
     "United States": 4.9, "France": 4.8, "Slovakia": 4.2, "Portugal": 3.7,
     "Canada": 3.7, "Germany": 3.3, "Japan": 2.6, "China": 1.6,
     "Switzerland": 0.4,
 }
+YIELDS_ASOF = "Yields as of 6 Nov 2026 (Trading Economics, via Case Packet 2026 part 9)"
 # Raw data: OECD Corporate Tax Statistics 2024, Table II.1 (Figure 2.1), statutory corporate
 # income tax rates for 2024 in percent (combined central and sub-central).
 # File: https://stat.link/0qkxo1 (version 1, updated 11-Jul-2024).
@@ -278,6 +278,7 @@ def fetch_tax():
     """Tax rates come from the OECD Excel file embedded in this app."""
     return {"ok": True, "embedded": True,
             "tax": {norm(k): float(v) for k, v in EMBEDDED_TAX.items()},
+            "names": list(EMBEDDED_TAX),
             "asof": TAX_ASOF, "fetched": "n/a (embedded raw data)", "error": None}
 
 
@@ -303,56 +304,12 @@ def fetch_spread():
         lambda: {"spread": FALLBACK_SPREAD, "asof": "Case Packet 2026 example (fallback)"})
 
 
-# ---- 4. Government bond yields --------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def _yields_live():
-    out, dates, errors = {}, [], []
-    for url in TE_PAGES:
-        try:
-            r = http_get(url, referer="https://tradingeconomics.com/")
-        except Exception as exc:
-            errors.append(f"{url.split('tradingeconomics.com')[-1] or '/bonds'}: "
-                          f"{type(exc).__name__}: {str(exc)[:80]}")
-            continue
-        for rows in parse_tables(r.text):
-            hdr_i = next((i for i, row in enumerate(rows)
-                          if any(c.strip().lower() in ("yield", "last") for c in row)), None)
-            if hdr_i is None:
-                continue
-            hdr = [c.strip().lower() for c in rows[hdr_i]]
-            yi = hdr.index("yield") if "yield" in hdr else hdr.index("last")
-            di = next((k for k, h in enumerate(hdr) if h in ("date", "reference")), None)
-            for row in rows[hdr_i + 1:]:
-                if len(row) <= yi:
-                    continue
-                name = next((c for c in row[:yi] if len(re.findall(r"[A-Za-z]", c)) >= 3), None)
-                y = to_float(row[yi])
-                if name and y is not None:
-                    out.setdefault(name.strip(), y)
-                    if di is not None and len(row) > di:
-                        dates.append(row[di])
-    if len(out) < 5:
-        raise ValueError("Too few countries parsed. " + "; ".join(errors[:3]))
-    return {"ok": True, "yields": out,
-            "asof": "Latest quotes on page" + (f" (e.g. {dates[0]})" if dates else ""),
-            "fetched": now_utc(), "error": None}
-
-
-def parse_pasted_yields(text):
-    """Read lines such as 'Brazil 14.70' or 'Brazil<TAB>14.70<TAB>...'."""
-    out = {}
-    for line in (text or "").splitlines():
-        m = re.match(r"^\s*([A-Za-z][A-Za-z .'()&-]*?)[\s,;|:]+(-?\d+(?:\.\d+)?)", line)
-        if m:
-            out[m.group(1).strip()] = float(m.group(2))
-    return out
-
-
+# ---- 4. Government bond yields (embedded raw data) -------------------
 def fetch_yields():
-    return live_or_fallback(
-        _yields_live,
-        lambda: {"yields": dict(FALLBACK_YIELDS),
-                 "asof": "Case Packet 2026, 6 Nov 2026 (fallback)"})
+    return {"ok": True, "embedded": True,
+            "yields": dict(EMBEDDED_YIELDS), "asof": YIELDS_ASOF,
+            "fetched": "n/a (embedded raw data)", "error": None}
+
 
 # ----------------------------------------------------------------------
 # Calculation. All rates are decimals (0.05 = 5%).
@@ -400,38 +357,30 @@ sb = st.sidebar
 if sb.button("Refresh data", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
-sb.caption("Data fetch time: " + yields["fetched"])
-for label, src in (("Betas", betas), ("Tax rates", taxes),
-                   ("BBB spread", spread), ("Bond yields", yields)):
+sb.caption("Betas and BBB spread fetched: " + betas["fetched"])
+for label, src in (("Betas", betas), ("BBB spread", spread)):
     if not src["ok"]:
-        extra = " You can paste yields below." if label == "Bond yields" else ""
-        sb.warning(f"{label}: live fetch failed. Fallback data is in use." + extra)
-sb.caption("Tax rates: OECD 2024 file, embedded in the app.")
-with sb.expander("Paste bond yields (optional)"):
-    st.caption("Copy the table from Trading Economics and paste it here. "
-               "One country per line, for example: Brazil 14.70. "
-               "Pasted rows replace the same countries in the data below.")
-    pasted_text = st.text_area("Country and 10-year yield (%)", key="paste_yields", height=140)
-pasted_map = parse_pasted_yields(pasted_text)
-if pasted_map:
-    yields = {**yields, "yields": {**yields["yields"], **pasted_map},
-              "asof": yields["asof"] + f" + {len(pasted_map)} pasted rows"}
+        sb.warning(f"{label}: live fetch failed. Fallback data is in use.")
+sb.caption("Tax rates (OECD 2024 file) and bond yields (6 Nov 2026) are embedded data.")
 
 sb.header("Selections")
-sb.caption("Fetched values are in use. Switch on an Override box to enter your own value.")
+sb.caption("Each box starts with the fetched value. Type in any box to change it.")
+missing = []
 
 
-def override(label, auto, key, lo, hi, step, fmt="%.4f", default_if_missing=0.0):
-    """Number input with an on/off switch. Returns the value in use."""
-    missing = auto is None
-    on = sb.checkbox(f"Override {label}", value=missing, key=f"on_{key}",
-                     disabled=missing)
-    base = default_if_missing if missing else auto
-    if on or missing:
-        return sb.number_input(label, lo, hi, float(base), step, format=fmt,
-                               key=f"in_{key}")
-    sb.caption(f"{label}: {base:{fmt[1:]}} (fetched)")
-    return float(base)
+def field(label, auto, key, lo, hi, step, fmt="%.2f", required=True):
+    """Text box that starts at the fetched value and can be edited at once.
+
+    The key includes the fetched value, so the box resets when that value changes
+    (new industry, new country, or refreshed data).
+    """
+    box = sb.number_input(label, min_value=lo, max_value=hi,
+                          value=None if auto is None else float(auto),
+                          step=step, format=fmt, key=f"{key}|{auto}",
+                          placeholder="Enter a value")
+    if box is None and required:
+        missing.append(label)
+    return box
 
 
 # ---- 1. Industry -----------------------------------------------------
@@ -441,65 +390,65 @@ ind_index = industries.index(DEFAULT_INDUSTRY) if DEFAULT_INDUSTRY in industries
 industry = sb.selectbox("Industry", industries, index=ind_index)
 auto_beta = float(betas["df"].loc[betas["df"]["Industry Name"] == industry,
                                   "Unlevered beta"].iloc[0])
-beta_u = override("unlevered beta", auto_beta, f"beta_{industry}", 0.0, 5.0, 0.01, "%.4f")
+beta_u = field("Unlevered beta", auto_beta, f"beta_{industry}", 0.0, 5.0, 0.01, "%.4f")
 
 # ---- 2. Target country ----------------------------------------------
 sb.divider()
 sb.subheader("2. Target country")
 yield_map = {norm(k): v for k, v in yields["yields"].items()}
-display_names = {norm(k): k for k in yields["yields"]}
+display_names = {norm(k): k for k in taxes["names"]}
+display_names.update({norm(k): k for k in yields["yields"]})
 display_names["united states"] = "United States"
 countries = sorted(display_names.values())
 c_index = countries.index(DEFAULT_COUNTRY) if DEFAULT_COUNTRY in countries else 0
 country = sb.selectbox("Target country", countries, index=c_index)
 is_us = norm(country) == "united states"
 
-auto_tax_us = taxes["tax"].get("united states")
-auto_tax_fx = taxes["tax"].get(norm(country))
-auto_yld_fx = yield_map.get(norm(country))
-
 tax_basis = sb.radio("Project tax rate", ["United States", "Selected country"],
                      horizontal=True)
-tax_us_pct = override("U.S. tax rate (%)", auto_tax_us, "tax_us", 0.0, 60.0, 0.1, "%.2f", 25.0)
+tax_us_pct = field("U.S. tax rate (%)", taxes["tax"].get("united states"), "tax_us",
+                   0.0, 60.0, 0.1, "%.2f")
 if is_us:
     tax_fx_pct = tax_us_pct
 else:
-    tax_fx_pct = override(f"{country} tax rate (%)", auto_tax_fx, f"tax_{country}",
-                          0.0, 60.0, 0.1, "%.2f", 25.0)
-    yld_fx_pct = override(f"{country} 10-year yield (%)", auto_yld_fx, f"yld_{country}",
-                          -2.0, 100.0, 0.01, "%.2f", 5.0)
+    tax_fx_pct = field(f"{country} tax rate (%)", taxes["tax"].get(norm(country)),
+                       f"tax_{country}", 0.0, 60.0, 0.1, "%.2f",
+                       required=(tax_basis == "Selected country"))
+    yld_fx_pct = field(f"{country} 10-year yield (%)", yield_map.get(norm(country)),
+                       f"yld_{country}", -2.0, 100.0, 0.01, "%.2f")
 
 # ---- 3. Risk information --------------------------------------------
 sb.divider()
 sb.subheader("3. Risk information")
 erp_pct = sb.number_input("Equity risk premium (%)", 0.0, 30.0, DEFAULT_ERP, 0.1)
 debt_pct = sb.slider("Target debt share (%)", 0, 90, DEFAULT_DEBT, 1)
-auto_yld_us = yield_map.get("united states")
-yld_us_pct = override("U.S. 10-year yield (%)", auto_yld_us, "yld_us", -2.0, 50.0, 0.01, "%.2f", 4.0)
+yld_us_pct = field("U.S. 10-year yield (%)", yield_map.get("united states"), "yld_us",
+                   -2.0, 50.0, 0.01, "%.2f")
 if is_us:
     yld_fx_pct = yld_us_pct
-
-tax_used_pct = tax_us_pct if tax_basis == "United States" else tax_fx_pct
 
 # ---- 4. Spread information ------------------------------------------
 sb.divider()
 sb.subheader("4. Spread information")
-spread_us_pct = override("USD BBB spread (%)", spread["spread"], "spread_us", 0.0, 20.0, 0.01,
-                         "%.4f", FALLBACK_SPREAD)
-# Foreign-currency spread: automatic unless the user overrides it.
+spread_us_pct = field("USD BBB spread (%)", spread["spread"], "spread_us",
+                      0.0, 20.0, 0.01, "%.4f")
+
+if missing:
+    st.title("International Cost of Capital")
+    st.warning("Enter a value in the sidebar for: " + ", ".join(missing) + ".")
+    st.stop()
+
+tax_used_pct = tax_us_pct if tax_basis == "United States" else tax_fx_pct
+
+# Foreign-currency spread: starts at the automatic value, then can be edited.
 f_auto = (1 + yld_fx_pct / 100) / (1 + yld_us_pct / 100)
 auto_spread_fx_pct = spread_us_pct * f_auto
-fx_spread_on = sb.checkbox("Override foreign-currency spread", value=False)
-if fx_spread_on:
-    spread_fx_pct = sb.number_input(
-        "Foreign-currency spread (%)", 0.0, 50.0, round(auto_spread_fx_pct, 4), 0.01,
-        format="%.4f", key=f"in_spreadfx_{round(auto_spread_fx_pct, 4)}")
-else:
-    sb.number_input("Foreign-currency spread (%), automatic",
-                    value=round(auto_spread_fx_pct, 4),
-                    format="%.4f", disabled=True,
-                    key=f"dis_spreadfx_{round(auto_spread_fx_pct, 4)}")
-    spread_fx_pct = None
+spread_fx_box = field("Foreign-currency spread (%)", auto_spread_fx_pct, "spread_fx",
+                      0.0, 50.0, 0.01, "%.4f")
+spread_fx_pct = (None if spread_fx_box is None
+                 or abs(spread_fx_box - auto_spread_fx_pct) < 1e-9 else spread_fx_box)
+fx_spread_on = spread_fx_pct is not None
+sb.caption("Foreign spread starts at USD spread × (1 + foreign yield) / (1 + U.S. yield).")
 
 # ---- Compute ---------------------------------------------------------
 params = dict(
@@ -557,9 +506,9 @@ with tab_res:
     # Download
     out = table.reset_index()
     inputs = pd.DataFrame({
-        "Input": ["Industry", "Country", "Tax basis", "Fetch time", "Foreign spread override"],
-        "Value": [industry, country, tax_basis, yields["fetched"],
-                  "on" if fx_spread_on else "off"],
+        "Input": ["Industry", "Country", "Tax basis", "Beta and spread fetch time", "Foreign spread edited"],
+        "Value": [industry, country, tax_basis, betas["fetched"],
+                  "yes" if fx_spread_on else "no"],
     })
     csv = out.to_csv(index=False) + "\n" + inputs.to_csv(index=False)
     st.download_button("Download results (CSV)", csv, "cost_of_capital_results.csv", "text/csv")
@@ -575,10 +524,10 @@ with tab_assume:
         ["BBB (Baa2) USD spread", "Damodaran (NYU Stern)", URL_RATINGS,
          spread["asof"], spread["fetched"], "Live" if spread["ok"] else "Fallback"],
         ["10-year government yields", "Trading Economics", URL_BONDS,
-         yields["asof"], yields["fetched"], "Live" if yields["ok"] else "Fallback"],
+         yields["asof"], yields["fetched"], "Embedded data"],
     ], columns=["Data", "Source", "URL", "Data date", "Fetched", "Status"])
     st.dataframe(src_tbl, use_container_width=True, hide_index=True)
-    for label, src in (("Betas", betas), ("Tax", taxes), ("Spread", spread), ("Yields", yields)):
+    for label, src in (("Betas", betas), ("Spread", spread)):
         if src["error"]:
             st.caption(f"{label} fetch error: {src['error']}")
 
@@ -592,7 +541,7 @@ with tab_assume:
 - **Cost of debt (USD).** `Rd = Rf + BBB spread`. Interest is fully deductible when paid.
 - **WACC.** `(1 − d) × Re + d × Rd × (1 − τ)`. The same tax rate, debt share, and ERP apply in both currencies.
 - **Currency conversion.** Equal real rates and relative PPP link yields to expected depreciation. `1 + Re* = (1 + Re) × (1 + Rf*) / (1 + Rf)`.
-- **Foreign spread.** By default `s* = s × (1 + Rf*) / (1 + Rf)`. You can override it. The override does not change USD results.
+- **Foreign spread.** The box starts at `s* = s × (1 + Rf*) / (1 + Rf)`. You can type another value. This does not change USD results.
 - **Government yields** include liquidity and term premia. They can include sovereign default risk.
 - **Currency risk.** Exchange-rate betas are near zero, so currency risk gets no separate premium.
         """
@@ -614,7 +563,7 @@ with tab_ver:
                    f"Re {pct(ex['re_usd'], 4)}, WACC {pct(ex['wacc_usd'], 4)}, "
                    f"Re* {pct(ex['re_fx'], 4)}, WACC* {pct(ex['wacc_fx'], 4)}", ok1])
 
-    # 2. Equal yields, spread override off -> equal results.
+    # 2. Equal yields, spread at automatic value -> equal results.
     eq = compute(**{**params, "rf_fx": params["rf_us"]}, spread_fx=None)
     ok2 = (abs(eq["re_usd"] - eq["re_fx"]) < tol and abs(eq["wacc_usd"] - eq["wacc_fx"]) < tol
            and abs(eq["rd_usd"] - eq["rd_fx"]) < tol)
@@ -634,7 +583,7 @@ with tab_ver:
     usd_keys = ["beta_e", "re_usd", "rd_usd", "rd_usd_at", "wacc_usd"]
     ok4 = all(abs(a[k] - b[k]) < tol for k in usd_keys) and abs(a["wacc_fx"] - b["wacc_fx"]) > 0 \
         if params["d"] > 0 else all(abs(a[k] - b[k]) < tol for k in usd_keys)
-    checks.append(["4. Foreign spread override leaves USD unchanged", "USD values identical",
+    checks.append(["4. Changing the foreign spread leaves USD unchanged", "USD values identical",
                    f"USD WACC {pct(a['wacc_usd'], 6)} vs {pct(b['wacc_usd'], 6)}", ok4])
 
     chk = pd.DataFrame(checks, columns=["Check", "Expected", "Result", "Pass"])
